@@ -153,19 +153,21 @@ sub cbw_page_name ( $index, $url, $total ) {
     return sprintf( "%0*d.%s", $width, $index, $ext );
 }
 
-# fetch_cbw_image($url)
+# fetch_cbw_image($url, $connect_timeout, $request_timeout)
 # Downloads a single CBW page image and returns its raw bytes.
 # The server proxies remote images so the rest of the stack (thumbnails, resizing, page cache)
 # works unchanged. Callers (get_page_data) already cache the result, so each image is fetched once.
-sub fetch_cbw_image ($url) {
+# Timeouts are parameters so background prefetching can use tighter budgets
+# than on-demand page serving: a hung remote must not stall the event loop.
+sub fetch_cbw_image ( $url, $connect_timeout = 10, $request_timeout = 30 ) {
 
     my $logger = get_logger( "Archive", "lanraragi" );
 
     state $ua = Mojo::UserAgent->new;
 
     # Prevent a hung remote server from blocking the event loop indefinitely.
-    $ua->connect_timeout(10);
-    $ua->request_timeout(30);
+    $ua->connect_timeout($connect_timeout);
+    $ua->request_timeout($request_timeout);
 
     # Some CDNs reject requests without a browser-like User-Agent (hotlink protection).
     my $tx = $ua->max_redirects(5)->get(
@@ -212,7 +214,9 @@ sub cbw_prefetch ( $archive, $id, $current_path, $count = 3 ) {
 
         $logger->debug("CBW prefetch: page $idx ($path) from $url");
 
-        my $content = eval { fetch_cbw_image($url) };
+        # Tight timeouts: prefetch runs inside the event loop, so a slow
+        # remote must fail fast instead of blocking all other requests.
+        my $content = eval { fetch_cbw_image( $url, 3, 8 ) };
         if ($content) {
             put( $cache_key, $content );
             $logger->debug("CBW prefetch OK: $cache_key");

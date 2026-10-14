@@ -17,7 +17,7 @@ use File::Copy "cp";
 use File::Path qw(make_path);
 use Mojo::IOLoop;
 
-use LANraragi::Utils::Generic    qw(render_api_response);
+use LANraragi::Utils::Generic    qw(render_api_response enqueue_coalesced_thumbnail_job);
 use LANraragi::Utils::String     qw(trim trim_CRLF);
 use LANraragi::Utils::TempFolder qw(get_temp);
 use LANraragi::Utils::Logging    qw(get_logger);
@@ -220,7 +220,11 @@ sub serve_thumbnail {
         if ($no_fallback) {
 
             # Queue a minion job to generate the thumbnail. Thumbnail jobs have the lowest priority.
-            my $job_id = $self->minion->enqueue( thumbnail_task => [ $thumbdir, $id, $page ] => { priority => 0, attempts => 3 } );
+            # Coalesced: concurrent requests for the same missing thumb share
+            # one job instead of enqueueing duplicates (homepage/carousel
+            # overlap, client retries).
+            my $job_id =
+              enqueue_coalesced_thumbnail_job( $self, "thumb:$id:$page", "thumbnail_task", [ $thumbdir, $id, $page ] );
             $self->render(
                 openapi => {
                     operation => "serve_thumbnail",
@@ -255,9 +259,15 @@ sub get_page_data ( $id, $path ) {
         put( $cachekey, $content );
 
         # For CBW archives, prefetch upcoming pages asynchronously so they're
-        # cache hits when the user navigates forward.
+        # cache hits when the user navigates forward. Guarded: a prefetch
+        # failure (bad XML, dead remote) must never break the page just served.
         if ( is_cbw($archive) ) {
-            Mojo::IOLoop->next_tick( sub { cbw_prefetch( $archive, $id, $path, 3 ) } );
+            Mojo::IOLoop->next_tick(
+                sub {
+                    eval { cbw_prefetch( $archive, $id, $path, 3 ) };
+                    get_logger( "File Serving", "lanraragi" )->debug("CBW prefetch failed: $@") if $@;
+                }
+            );
         }
     }
     return $content;

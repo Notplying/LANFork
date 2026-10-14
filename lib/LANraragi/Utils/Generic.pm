@@ -34,7 +34,7 @@ BEGIN {
 use Exporter 'import';
 our @EXPORT_OK = qw(is_image is_archive render_api_response get_tag_with_namespace shasum_str start_shinobu
   split_workload_by_cpu start_minion get_css_list generate_themes_header flat get_bytelength array_difference
-  intersect_arrays filter_hash_by_keys exec_with_lock exec_with_lock_pure generate_css_detail get_version
+  intersect_arrays filter_hash_by_keys exec_with_lock exec_with_lock_pure coalesce_job enqueue_coalesced_thumbnail_job generate_css_detail get_version
   get_item_title get_authenticator);
 
 # Version information
@@ -149,9 +149,23 @@ sub start_minion {
         close($fh);
         return $proc;
     } else {
+        # Windows has no fork(), so Minion jobs can't run as parallel tasks
+        # inside one worker like on Unix. Instead, start one single-threaded
+        # Worker process per CPU (capped): Minion's queue is atomic, so jobs
+        # partition safely across them. This drains thumbnail backlogs ~Nx
+        # faster on multi-core machines. Duplicate same-file jobs are already
+        # suppressed at enqueue time (see coalesce_job), so parallel workers
+        # can't corrupt each other's thumbnails.
+        my $workers = eval { MCE::Util::get_ncpu() } // 1;
+        $workers = 1 if $workers < 1;
+        $workers = 4 if $workers > 4;
+
+        $logger->info("Starting $workers Minion worker(s).");
         my $proc;
-        Win32::Process::Create( $proc, undef, "perl \"" . abs_path(".") . "/lib/Worker.pm\"", 0, NORMAL_PRIORITY_CLASS, "." );
-        $logger->info( "Starting new Minion worker with PID " . $proc->GetProcessID() . "." );
+        for ( 1 .. $workers ) {
+            Win32::Process::Create( $proc, undef, "perl \"" . abs_path(".") . "/lib/Worker.pm\"", 0, NORMAL_PRIORITY_CLASS, "." );
+            $logger->info( "Starting new Minion worker with PID " . $proc->GetProcessID() . "." );
+        }
         return $proc;
     }
 }
@@ -490,6 +504,53 @@ LUA
     die $fn_err if $fn_err;
     return 1, $response;
 
+}
+
+# In-process job coalescing for thundering-herd endpoints (e.g. ~100
+# concurrent thumbnail requests for missing thumbs). Runs $func at most once
+# per $key per $ttl_seconds and hands every concurrent caller the same job ID.
+# Returns ($job_id, $is_new): $is_new is 1 when $func ran, 0 when an existing
+# pending job was reused. Purely in-memory: correct for the single-process
+# Windows Daemon (the only Minion-job producer that needs it); multi-process
+# servers may still enqueue rare duplicates, exactly as before this change.
+my %COALESCE_JOBS;
+
+sub coalesce_job {
+
+    my ( $key, $ttl_seconds, $func ) = @_;
+    my $now = time;
+
+    # Prune expired entries so the table stays tiny.
+    foreach my $k ( keys %COALESCE_JOBS ) {
+        delete $COALESCE_JOBS{$k} if $COALESCE_JOBS{$k}[1] < $now;
+    }
+
+    if ( exists $COALESCE_JOBS{$key} ) {
+        return ( $COALESCE_JOBS{$key}[0], 0 );
+    }
+
+    my $job_id = $func->();
+    $COALESCE_JOBS{$key} = [ $job_id, $now + $ttl_seconds ];
+    return ( $job_id, 1 );
+}
+
+# How long a coalesced thumbnail job ID is shared with concurrent requesters.
+# Must exceed the worst-case drain time of a cold thumbnail backlog so
+# duplicates are not re-enqueued while workers are still busy; expired entries
+# make failed jobs retryable again.
+use constant THUMBNAIL_JOB_TTL => 120;
+
+# Enqueues a Minion thumbnail job, coalesced across concurrent requesters.
+# Returns the (possibly shared) job ID. See coalesce_job.
+sub enqueue_coalesced_thumbnail_job {
+
+    my ( $mojo, $key, $task, $args ) = @_;
+    my ( $job_id, undef ) = coalesce_job(
+        $key,
+        THUMBNAIL_JOB_TTL,
+        sub { $mojo->minion->enqueue( $task => $args => { priority => 0, attempts => 3 } ) }
+    );
+    return $job_id;
 }
 
 sub get_version {

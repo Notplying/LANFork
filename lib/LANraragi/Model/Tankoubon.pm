@@ -17,7 +17,7 @@ use File::Path qw(make_path);
 
 use LANraragi::Utils::Archive  qw(extract_thumbnail);
 use LANraragi::Utils::Database qw(invalidate_cache get_archive_json_multi get_tankoubons_by_file update_indexes);
-use LANraragi::Utils::Generic  qw(array_difference filter_hash_by_keys render_api_response);
+use LANraragi::Utils::Generic  qw(array_difference filter_hash_by_keys render_api_response enqueue_coalesced_thumbnail_job);
 use LANraragi::Utils::Logging  qw(get_logger);
 use LANraragi::Utils::Redis    qw(redis_decode redis_encode);
 use LANraragi::Utils::String   qw(trim trim_CRLF);
@@ -848,7 +848,10 @@ sub serve_tankoubon_thumbnail {
 
         if ($no_fallback) {
 
-            my $job_id = $self->minion->enqueue( tank_thumbnail_task => [ $thumbdir, $tank_id ] => { priority => 0, attempts => 3 } );
+            # Coalesced like Archive::serve_thumbnail: one job per missing
+            # tank thumb, shared by concurrent requesters.
+            my $job_id =
+              enqueue_coalesced_thumbnail_job( $self, "tankthumb:$tank_id", "tank_thumbnail_task", [ $thumbdir, $tank_id ] );
             $self->render(
                 openapi => {
                     operation => "serve_tankoubon_thumbnail",

@@ -40,21 +40,44 @@ if (IS_UNIX) {
     $glib_ffi = $vips_ffi;
     $gobject_ffi = $vips_ffi;
 } else {
-    $vips_ffi = FFI::Platypus->new(
-        api => 2,
-        lib => find_lib( lib => [ 'vips', 'vips-42' ] ),
-    );
+    # Windows: libvips/gobject/glib live in separate DLLs that may be absent
+    # (or unfindable) on user machines. Never die at startup here -- fall back
+    # to the dummy functions below so the app keeps working with the
+    # ImageMagick resizer, mirroring the Unix branch above.
+    if (_load_windows_libs()) {
+        $VIPS_LOADED = 1;
+    } else {
+        warn "Could not find libvips on Windows. Some functions will not be available.\n";
+    }
+}
 
-    $gobject_ffi = FFI::Platypus->new(
-        api => 2,
-        lib => find_lib( lib => [ 'gobject' ] ),
-    );
+# Attempts to bind the Windows libvips DLLs. Returns 1 on success, 0 otherwise.
+# Split out (rather than inlined above) so it can be unit-tested by mocking
+# FFI::CheckLib::find_lib into failure.
+sub _load_windows_libs () {
+    my $ok = eval {
+        my @vips    = find_lib( lib => [ 'vips', 'vips-42' ] );
+        my @gobject = find_lib( lib => [ 'gobject' ] );
+        my @glib    = find_lib( lib => [ 'glib' ] );
+        die "missing libvips DLLs\n" unless ( @vips && @gobject && @glib );
 
-    $glib_ffi = FFI::Platypus->new(
-        api => 2,
-        lib => find_lib( lib => [ 'glib' ] ),
-    );
-    $VIPS_LOADED = 1;
+        $vips_ffi = FFI::Platypus->new(
+            api => 2,
+            lib => \@vips,
+        );
+
+        $gobject_ffi = FFI::Platypus->new(
+            api => 2,
+            lib => \@gobject,
+        );
+
+        $glib_ffi = FFI::Platypus->new(
+            api => 2,
+            lib => \@glib,
+        );
+        1;
+    };
+    return $ok ? 1 : 0;
 }
 
 if ($VIPS_LOADED) {
@@ -255,7 +278,15 @@ sub write_to_buffer ($image, $format, $quality) {
     my $buf;
     my $len;
     my $ret;
-    $ret = vips_image_write_to_buffer($image, $format, \$buf, \$len, "Q", $quality, undef);
+    if ( $format =~ /^\.jpe?g$/i ) {
+        # strip metadata + optimal Huffman tables: smaller files for negligible
+        # extra CPU (per libvips vipsthumbnail best practices). Interlace is
+        # deliberately omitted: progressive JPEGs cost much more memory to
+        # encode and decode -- harmful on the single-process Windows server.
+        $ret = vips_image_write_to_buffer($image, $format, \$buf, \$len, "Q", $quality, "strip", 1, "optimize_coding", 1, undef);
+    } else {
+        $ret = vips_image_write_to_buffer($image, $format, \$buf, \$len, "Q", $quality, undef);
+    }
     if ($ret == 0) {
         my $image_data = buffer_to_scalar($buf, $len);
         g_free($buf);

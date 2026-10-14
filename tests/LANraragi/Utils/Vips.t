@@ -59,6 +59,40 @@ note("test reading a pdf");
    
 }
 
+note("jpeg buffer writing strips metadata and optimizes coding");
+{
+    my $img = LANraragi::Utils::Vips::new_from_file("$cwd/tests/samples/reader.jpg");
+
+    # Baseline: Q-only encode via the raw FFI binding.
+    require FFI::Platypus::Buffer;
+    my ( $raw_buf, $raw_len );
+    my $r = LANraragi::Utils::Vips::vips_image_write_to_buffer( $img, ".jpg", \$raw_buf, \$raw_len, "Q", 80, undef );
+    is( $r, 0, "baseline Q-only encode succeeds" );
+    my $baseline = FFI::Platypus::Buffer::buffer_to_scalar( $raw_buf, $raw_len );
+    LANraragi::Utils::Vips::g_free($raw_buf);
+
+    my $optimized = LANraragi::Utils::Vips::write_to_buffer( $img, ".jpg", 80 );
+    ok( defined($optimized) && length($optimized) > 0, "optimized encode produces output" );
+    ok( length($optimized) <= length($baseline), "stripped + optimal-Huffman output is no larger than baseline" );
+
+    # Round-trip: the optimized bytes must decode with identical dimensions.
+    my $rt = LANraragi::Utils::Vips::new_from_buffer($optimized);
+    is( LANraragi::Utils::Vips::width($rt),  LANraragi::Utils::Vips::width($img),  "round-trip preserves width" );
+    is( LANraragi::Utils::Vips::height($rt), LANraragi::Utils::Vips::height($img), "round-trip preserves height" );
+    LANraragi::Utils::Vips::unref_image($rt);
+    LANraragi::Utils::Vips::unref_image($img);
+}
+
+note("windows lib loading degrades gracefully when DLLs are missing");
+{
+    # Mock the imported alias inside the Vips namespace (redefining
+    # FFI::CheckLib::find_lib would not retarget the compile-time import).
+    my $mock = Test::MockModule->new('LANraragi::Utils::Vips');
+    $mock->redefine( 'find_lib', sub { die "No library found\n"; } );
+    is( LANraragi::Utils::Vips::_load_windows_libs(), 0, "loader returns false when DLLs are missing" );
+    ok( LANraragi::Utils::Vips::is_vips_loaded(), "existing loaded state is untouched by the probe" );
+}
+
 done_testing();
 
 1;
