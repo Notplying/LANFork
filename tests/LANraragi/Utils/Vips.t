@@ -73,7 +73,12 @@ note("jpeg buffer writing strips metadata and optimizes coding");
 
     my $optimized = LANraragi::Utils::Vips::write_to_buffer( $img, ".jpg", 80 );
     ok( defined($optimized) && length($optimized) > 0, "optimized encode produces output" );
-    ok( length($optimized) <= length($baseline), "stripped + optimal-Huffman output is no larger than baseline" );
+
+    # Strictly smaller: proves the strip/optimize_coding options actually
+    # reach libvips. (FFI::Platypus only marshals varargs covered by the
+    # attach spec -- silently dropped options would yield byte-identical
+    # output, which this assertion catches.)
+    ok( length($optimized) < length($baseline), "stripped + optimal-Huffman output is smaller than baseline" );
 
     # Round-trip: the optimized bytes must decode with identical dimensions.
     my $rt = LANraragi::Utils::Vips::new_from_buffer($optimized);

@@ -94,6 +94,12 @@ if ($VIPS_LOADED) {
     $vips_ffi->attach( vips_resize => ['VipsImage', 'VipsImage*', 'double'] => ['opaque'] => 'int' );
     $vips_ffi->attach( vips_jpegsave => ['VipsImage', 'string'] => ['opaque'] => 'int' );
     $vips_ffi->attach( vips_image_write_to_buffer => ['VipsImage', 'string', 'opaque*', 'size_t*'] => ['string', 'int', 'opaque'] => 'int' );
+    # JPEG-only variant declaring the full option list. FFI::Platypus
+    # marshals only varargs covered by the spec -- anything beyond it is
+    # numified and dropped (with warnings), so strip/optimize_coding need
+    # their own slots here. gboolean options map to int.
+    $vips_ffi->attach( [ vips_image_write_to_buffer => 'vips_image_write_jpeg' ] =>
+        ['VipsImage', 'string', 'opaque*', 'size_t*'] => ['string', 'int', 'string', 'int', 'string', 'int', 'opaque'] => 'int' );
     $gobject_ffi->attach( g_object_unref => ['GObject'] => 'void' );
     $glib_ffi->attach( g_free => ['opaque'] => 'void' );
     $vips_ffi->attach( vips_image_new_from_buffer => ['string', 'size_t', 'string'] => ['opaque'] => 'VipsImage' );
@@ -115,6 +121,7 @@ if ($VIPS_LOADED) {
     *vips_image_new_from_file = sub { die "libvips is not loaded. Cannot call vips_image_new_from_file." };
     *vips_jpegsave = sub { die "libvips is not loaded. Cannot call vips_jpegsave." };
     *vips_image_write_to_buffer = sub { die "libvips is not loaded. Cannot call vips_image_write_to_buffer." };
+    *vips_image_write_jpeg = sub { die "libvips is not loaded. Cannot call vips_image_write_jpeg." };
     *g_object_unref = sub { die "libvips is not loaded. Cannot call g_object_unref." };
     *g_free = sub { die "libvips is not loaded. Cannot call g_free." };
     *vips_image_new_from_buffer = sub { die "libvips is not loaded. Cannot call vips_image_new_from_buffer." };
@@ -283,7 +290,7 @@ sub write_to_buffer ($image, $format, $quality) {
         # extra CPU (per libvips vipsthumbnail best practices). Interlace is
         # deliberately omitted: progressive JPEGs cost much more memory to
         # encode and decode -- harmful on the single-process Windows server.
-        $ret = vips_image_write_to_buffer($image, $format, \$buf, \$len, "Q", $quality, "strip", 1, "optimize_coding", 1, undef);
+        $ret = vips_image_write_jpeg($image, $format, \$buf, \$len, "Q", $quality, "strip", 1, "optimize_coding", 1, undef);
     } else {
         $ret = vips_image_write_to_buffer($image, $format, \$buf, \$len, "Q", $quality, undef);
     }
