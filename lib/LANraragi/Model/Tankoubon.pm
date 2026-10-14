@@ -828,20 +828,23 @@ sub serve_tankoubon_thumbnail {
     my $no_fallback = $self->req->param('no_fallback');
     $no_fallback = ( $no_fallback && $no_fallback eq "true" ) || "0";
 
-    my $thumbdir        = LANraragi::Model::Config->get_thumbdir;
-    my $use_jxl         = LANraragi::Model::Config->get_jxlthumbpages;
-    my $format          = $use_jxl         ? 'jxl' : 'jpg';
-    my $fallback_format = $format eq 'jxl' ? 'jpg' : 'jxl';
+    my $thumbdir = LANraragi::Model::Config->get_thumbdir;
 
-    my $thumbbase      = "$thumbdir/TA/$tank_id";
-    my $thumbname      = "$thumbbase.$format";
-    my $fallback_thumb = "$thumbbase.$fallback_format";
-
-    unless ( -e $thumbname ) {
-        $thumbname = $fallback_thumb;
+    # Check both formats directly to avoid a second Redis config lookup per
+    # request (see Archive::serve_thumbnail). Newer file wins when both exist.
+    my $thumbbase = "$thumbdir/TA/$tank_id";
+    my @s_jpg     = stat("$thumbbase.jpg");
+    my @s_jxl     = stat("$thumbbase.jxl");
+    my $thumbname;
+    if ( @s_jpg && @s_jxl ) {
+        $thumbname = $s_jxl[9] > $s_jpg[9] ? "$thumbbase.jxl" : "$thumbbase.jpg";
+    } elsif (@s_jpg) {
+        $thumbname = "$thumbbase.jpg";
+    } elsif (@s_jxl) {
+        $thumbname = "$thumbbase.jxl";
     }
 
-    unless ( -e $thumbname ) {
+    unless ( defined($thumbname) ) {
 
         if ($no_fallback) {
 

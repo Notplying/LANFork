@@ -33,13 +33,13 @@ use LANraragi::Utils::Generic    qw(is_image shasum_str);
 use LANraragi::Utils::Redis      qw(redis_decode redis_encode);
 use LANraragi::Utils::Path       qw(get_archive_path open_path_or_die);
 use LANraragi::Utils::Resizer    qw(get_resizer);
-use LANraragi::Utils::PageCache  qw(fetch put);
+use LANraragi::Utils::PageCache  qw(fetch put remove);
 
 # Utilitary functions for handling Archives.
 # Relies on Libarchive (for zip, cbz), VIPS (for PDFs) and Mojo::UserAgent (for CBW web comics).
 use Exporter 'import';
 our @EXPORT_OK =
-  qw(is_file_in_archive extract_file_from_archive extract_single_file extract_thumbnail generate_thumbnail get_filelist is_cbw parse_cbw_urls cbw_prefetch);
+  qw(is_file_in_archive extract_file_from_archive extract_single_file extract_thumbnail generate_thumbnail get_filelist clear_filelist_cache is_cbw parse_cbw_urls cbw_prefetch);
 
 sub is_pdf {
     my ( $filename, $dirs, $suffix ) = fileparse( $_[0], qr/\.[^.]*/ );
@@ -312,12 +312,48 @@ sub expand {
     return lc($file);
 }
 
+# Removes the cached filelist for the given archive ID, if any.
+sub clear_filelist_cache ($arcid) {
+    remove("filelist/$arcid");
+}
+
+# Best-effort filelist cache store shared by the CBW and archive paths below.
+sub _maybe_cache_filelist ( $arcid, $mtime, $size, $files, $cacheable ) {
+    return unless $cacheable;
+    eval { put( "filelist/$arcid", [ $mtime, $size, [@$files] ] ) };
+}
+
 # Returns a list of all the files contained in the given archive with corresponding archive ID.
+# Results are cached in PageCache and validated against the archive file's
+# mtime+size, so repeated /files and OPDS-PSE requests under high concurrency
+# (e.g. Mihon fetching all pages in parallel) don't rescan the archive with
+# libarchive every time. libarchive has no async API and blocks the single
+# Daemon event loop on Windows, so avoiding redundant scans is critical.
 sub get_filelist ($archive, $arcid) {
 
     my $logger = get_logger( "Archive", "lanraragi" );
 
     my @files = ();
+
+    # Stringify once: $archive may be a Win32::LongPath::Path object on Windows.
+    my $path_str = defined($archive) ? "$archive" : "";
+
+    # Check the filelist cache first. Validate with mtime+size so a replaced
+    # file is rescanned instead of serving stale entries.
+    my @st = stat($path_str);
+    my ( $cur_size, $cur_mtime ) = @st ? ( $st[7], $st[9] ) : ( undef, undef );
+    if ( defined($cur_size) && defined($cur_mtime) && defined($arcid) && $arcid ne "" ) {
+        my $cached = eval { fetch("filelist/$arcid") };
+        if ( ref($cached) eq "ARRAY" && @$cached == 3 ) {
+            my ( $mtime, $size, $names ) = @$cached;
+            if ( defined($mtime) && defined($size) && ref($names) eq "ARRAY"
+                && $mtime == $cur_mtime && $size == $cur_size ) {
+                return @$names;
+            }
+        }
+    }
+
+    my $cacheable = defined($cur_size) && defined($cur_mtime) && defined($arcid) && $arcid ne "";
 
     if ( is_cbw($archive) ) {
 
@@ -331,6 +367,7 @@ sub get_filelist ($archive, $arcid) {
             push @files, cbw_page_name( $i, $urls[ $i - 1 ], $total );
         }
 
+        _maybe_cache_filelist( $arcid, $cur_mtime, $cur_size, \@files, $cacheable );
         return @files;
     }
 
@@ -400,6 +437,8 @@ sub get_filelist ($archive, $arcid) {
     my %cover_hash  = map  { $_ => 1 } @cover_pages;
     my @other_pages = grep { !$credit_hash{$_} && !$cover_hash{$_} } @files;
     @files = ( @cover_pages, @other_pages, @credit_pages );
+
+    _maybe_cache_filelist( $arcid, $cur_mtime, $cur_size, \@files, $cacheable );
 
     # Return files
     return @files;

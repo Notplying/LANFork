@@ -21,7 +21,7 @@ use LANraragi::Utils::Generic    qw(render_api_response);
 use LANraragi::Utils::String     qw(trim trim_CRLF);
 use LANraragi::Utils::TempFolder qw(get_temp);
 use LANraragi::Utils::Logging    qw(get_logger);
-use LANraragi::Utils::Archive    qw(extract_single_file extract_thumbnail is_cbw cbw_prefetch);
+use LANraragi::Utils::Archive    qw(extract_single_file extract_thumbnail is_cbw cbw_prefetch clear_filelist_cache);
 use LANraragi::Utils::Database   qw(invalidate_cache set_title set_tags set_summary get_archive_json get_archive_json_multi);
 use LANraragi::Utils::PageCache  qw(fetch put);
 use LANraragi::Utils::Redis      qw(redis_decode redis_encode);
@@ -190,26 +190,32 @@ sub serve_thumbnail {
     my $no_fallback = $self->req->param('no_fallback');
     $no_fallback = ( $no_fallback && $no_fallback eq "true" ) || "0";    # Prevent undef warnings by checking the variable first
 
-    my $thumbdir        = LANraragi::Model::Config->get_thumbdir;
-    my $use_jxl         = LANraragi::Model::Config->get_jxlthumbpages;
-    my $format          = $use_jxl         ? 'jxl' : 'jpg';
-    my $fallback_format = $format eq 'jxl' ? 'jpg' : 'jxl';
+    my $thumbdir = LANraragi::Model::Config->get_thumbdir;
 
     # Thumbnails are stored in the content directory, thumb subfolder.
     # Another subfolder with the first two characters of the id is used for FS optimization.
     my $subfolder = substr( $id, 0, 2 );
 
-    # Check for the page and set the appropriate thumbnail name and fallback thumbnail name
-    my $thumbbase          = ($is_first_page) ? "$thumbdir/$subfolder/$id" : "$thumbdir/$subfolder/$id/$page";
-    my $thumbname          = "$thumbbase.$format";
-    my $fallback_thumbname = "$thumbbase.$fallback_format";
-
-    # Check if the preferred format thumbnail exists, if not, try the alternate format
-    unless ( -e $thumbname ) {
-        $thumbname = $fallback_thumbname;
+    # Check for the page and set the appropriate thumbnail name and fallback thumbnail name.
+    # NOTE: Both formats are checked directly instead of reading the jxlthumbpages
+    # config. That saves one Redis connection (connect + SELECT + HGET + QUIT)
+    # per thumbnail request, which matters when the homepage fires ~100
+    # concurrent thumbnail requests at the single Windows Daemon process.
+    # When both formats exist (e.g. after a format-config switch), the newer
+    # file wins, matching the effective preference without a config lookup.
+    my $thumbbase = ($is_first_page) ? "$thumbdir/$subfolder/$id" : "$thumbdir/$subfolder/$id/$page";
+    my @s_jpg     = stat("$thumbbase.jpg");
+    my @s_jxl     = stat("$thumbbase.jxl");
+    my $thumbname;
+    if ( @s_jpg && @s_jxl ) {
+        $thumbname = $s_jxl[9] > $s_jpg[9] ? "$thumbbase.jxl" : "$thumbbase.jpg";
+    } elsif (@s_jpg) {
+        $thumbname = "$thumbbase.jpg";
+    } elsif (@s_jxl) {
+        $thumbname = "$thumbbase.jxl";
     }
 
-    unless ( -e $thumbname ) {
+    unless ( defined($thumbname) ) {
 
         if ($no_fallback) {
 
@@ -429,6 +435,8 @@ sub delete_archive ($id) {
     $redis_search->srem( "LRR_UNTAGGED",    $id );
     $redis_search->srem( "LRR_TANKGROUPED", $id );
     $redis_search->quit();
+
+    eval { clear_filelist_cache($id) };
 
     if ( -e $filename ) {
         my $status = unlink_path($filename);

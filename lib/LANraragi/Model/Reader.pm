@@ -52,7 +52,11 @@ sub build_reader_JSON ( $self, $id, $force ) {
     # Parse archive to get its list of images
     my @images = get_filelist($archive, $id);
 
-    $self->LRR_LOGGER->debug( "Files found in archive (encoding might be incorrect): \n " . Dumper @images );
+    # NOTE: Don't Dumper the full filelist here. This runs on every /files
+    # request and Dumper eagerly builds a huge string even when debug logs are
+    # suppressed (production level is info), stalling the single Windows
+    # Daemon loop under Mihon concurrency.
+    $self->LRR_LOGGER->debug( "Files found in archive: " . scalar(@images) . " pages" );
 
     # Build a browser-compliant filepath array from @images
     my @images_browser;

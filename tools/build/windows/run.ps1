@@ -21,6 +21,11 @@ $Env:LRR_DATA_DIRECTORY = $Data
 $Env:LRR_THUMB_DIRECTORY = $Thumb
 $Env:Path = "$PWD\runtime\bin;$PWD\runtime\redis;$($Env:Path)"
 
+# Mojolicious FAQ: EV reactor doesn't work with ithreads fork emulation on
+# Windows and can cause reliability issues. Force the portable Poll reactor
+# for the single-process Daemon server used here.
+$Env:MOJO_REACTOR = "Mojo::Reactor::Poll"
+
 [System.IO.Directory]::CreateDirectory("$PWD\log") | Out-Null
 [System.IO.Directory]::CreateDirectory("$PWD\temp") | Out-Null
 

@@ -40,8 +40,11 @@ sub do_search ( $filter, $category_id, $start, $sortkey, $sortorder, $newonly, $
     $filter = $filter // "";
     my $tankcount = $redis->scard("LRR_TANKGROUPED") + 0;
 
-    # Get tank ids count
-    my $tankidscount = scalar( LANraragi::Model::Config->get_redis->keys('TANK_??????????') );
+    # Get tank ids count (non-blocking SCAN; see scan_keys).
+    # NOTE: previous code leaked this connection by never calling quit().
+    my $redis_tmp      = LANraragi::Model::Config->get_redis;
+    my $tankidscount   = scalar( scan_keys( $redis_tmp, 'TANK_??????????' ) );
+    $redis_tmp->quit;
 
     # Total number of archives (as int)
     my $total = $grouptanks ? $tankcount : $redis->zcard("LRR_TITLES") - $tankidscount;
@@ -136,7 +139,7 @@ sub search_uncached ( $category_id, $filter, $sortkey, $sortorder, $newonly, $un
     } else {
 
         # Start with all our archive IDs. Tank IDs won't be present in this search.
-        @filtered = $redis_db->keys('????????????????????????????????????????');
+        @filtered = scan_keys( $redis_db, '????????????????????????????????????????' );
     }
 
     # If we're using a category, we'll need to get its source data first.
@@ -288,7 +291,7 @@ LUA
                 # If the tag has a namespace, We don't add a wildcard at the start of the tag to keep it intact.
                 # Otherwise, we add a wildcard at the start to match all namespaces.
                 my $indexkey = $tag =~ /:/ ? "INDEX_$tag*" : "INDEX_*$tag*";
-                my @keys     = $redis->keys($indexkey);
+                my @keys     = scan_keys( $redis, $indexkey );
 
                 # Get the list of IDs for each key
                 foreach my $key (@keys) {
@@ -682,6 +685,39 @@ sub _fallback_tags ( $redis, $tmpfilter, $re, @filtered ) {
         %$tmpfilter,
         map { $_ => ( $redis->hget( $_, "tags" ) =~ m/.*${re}:(.*?)(\,.*|$)/ ) ? $1 : "zzzz" } @archive_ids
     );
+}
+
+# scan_keys($redis, $pattern)
+# Non-blocking alternative to KEYS for production workloads.
+# Redis docs recommend SCAN over KEYS/SMEMBERS for large keyspaces since KEYS
+# can block the single-threaded server for seconds; this matters more on the
+# Windows Redis port used by LRR. Falls back to KEYS when SCAN is unavailable
+# (e.g. unit-test mocks that only implement keys()).
+sub scan_keys ( $redis, $pattern ) {
+    my $keys = eval {
+        die "SCAN unavailable" unless $redis->can('scan');
+
+        my @keys;
+        my $cursor = 0;
+        while (1) {
+            my @res = $redis->scan( $cursor, MATCH => $pattern, COUNT => 1000 );
+            last unless @res;
+
+            my ( $next, $found ) = @res;
+            if ( ref($found) eq 'ARRAY' ) {
+                push @keys, @$found;
+                $cursor = $next;
+            } else {
+                # Defensive: some clients return a flat (cursor, keys...) list.
+                $cursor = $next;
+                push @keys, @res[ 1 .. $#res ];
+            }
+            last if !defined($cursor) || $cursor == 0;
+        }
+        \@keys;
+    };
+
+    return $keys ? @$keys : $redis->keys($pattern);
 }
 
 1;

@@ -26,6 +26,9 @@ use LANraragi::Utils::Path    qw(create_path open_path_or_die date_modified get_
 
 use LANraragi::Model::Config;
 
+# Windows MAX_PATH: paths shorter than this don't need Win32 long-path handling.
+use constant MAX_PATH => 260;
+
 # Functions for interacting with the DB Model.
 use Exporter 'import';
 our @EXPORT_OK = qw(
@@ -237,7 +240,17 @@ sub build_json ( $id, %hash ) {
     my ( $name, $title, $tags, $summary, $file, $isnew, $progress, $pagecount, $lastreadtime, $arcsize, $toc ) =
       @hash{qw(name title tags summary file isnew progress pagecount lastreadtime arcsize toc)};
 
-    $file = create_path($file);
+    return unless defined($file);
+
+    # Windows fast path: Win32::LongPath::Path object construction per archive
+    # is measurably expensive when building 100 JSONs for the homepage.
+    # Only long paths (>= MAX_PATH chars) need it; short paths use the raw string.
+    my $file_raw = $file;
+    if ( length($file_raw) >= MAX_PATH ) {
+        $file = create_path($file_raw);
+    } else {
+        $file = $file_raw;
+    }
 
     # Return undef if the file doesn't exist.
     return unless ( defined($file) && -e $file );
@@ -247,7 +260,7 @@ sub build_json ( $id, %hash ) {
 
     my @chapters = ();
 
-    if ( defined $toc ) {
+    if ( defined $toc && $toc ne "" ) {
         eval { $toc = decode_json($toc) };
 
         if ( my $decode_error = $@ ) {
@@ -278,7 +291,7 @@ sub build_json ( $id, %hash ) {
         tags         => $tags // "",
         summary      => $summary,
         isnew        => $isnew ? $isnew : "false",
-        extension    => lc( ( split( /\./, $file ) )[-1] ),
+        extension    => lc( ( split( /\./, $file_raw ) )[-1] ),
         progress     => $progress     ? int($progress)     : 0,
         pagecount    => $pagecount    ? int($pagecount)    : 0,
         lastreadtime => $lastreadtime ? int($lastreadtime) : 0,
