@@ -5,7 +5,13 @@ use v5.36;
 use Test::More;
 
 use LANraragi::Utils::ImageMagickResizer;
-use Image::Magick;
+
+# Skip (not fail) where PerlMagick isn't available,
+# e.g. MSYS2 Windows envs which use libvips instead.
+my $has_magick = eval { require Image::Magick; 1 };
+if (!$has_magick) {
+    plan skip_all => "Image::Magick is not installed";
+}
 
 use Test::MockModule qw(strict);
 use Cwd qw(getcwd);

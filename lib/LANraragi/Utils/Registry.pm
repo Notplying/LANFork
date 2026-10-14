@@ -257,6 +257,12 @@ sub resolve_local_registry_artifact_path {
     return ( undef, "Invalid local registry path: $registry_root" )                     unless ( $resolved_registry_root && -d $resolved_registry_root );
 
     my $candidate = Mojo::File->new($resolved_registry_root)->child( @{ Mojo::File->new($plugpath)->to_array } )->to_string;
+
+    # Normalize to forward slashes on Windows so paths (and error messages
+    # containing them) behave identically across platforms. Windows file APIs
+    # accept / as a separator.
+    $candidate =~ s{\\}{/}g if $^O eq 'MSWin32';
+
     return ( undef, "Plugin file not found: $candidate" )                               unless ( -e $candidate );
 
     my $resolved_artifact = abs_path($candidate);
